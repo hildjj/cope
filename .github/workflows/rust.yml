@@ -21,7 +21,7 @@ jobs:
     - name: Build
       run: cargo build --verbose
     - name: Install tarpaulin
-      run: RUSTFLAGS="--cfg procmacro2_semver_exempt" cargo install cargo-tarpaulin -f
+      run: cargo tarpaulin --version || RUSTFLAGS="--cfg procmacro2_semver_exempt" cargo install cargo-tarpaulin -f
     - name: Run tests
       run: cargo tarpaulin --output-dir coverage -o lcov
     - name: Upload coverage reports to Codecov
