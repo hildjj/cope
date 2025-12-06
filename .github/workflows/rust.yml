@@ -16,12 +16,12 @@ jobs:
 
     steps:
     - uses: actions/checkout@v6
-    - run: rustup toolchain install stable --profile minimal
+    # - run: rustup toolchain install stable --profile minimal
     - uses: Swatinem/rust-cache@v2
     - name: Build
       run: cargo build --verbose
-    - name: Install tarpaulin
-      run: RUSTFLAGS="--cfg procmacro2_semver_exempt" cargo install cargo-tarpaulin -f
+    # - name: Install tarpaulin
+    #   run: RUSTFLAGS="--cfg procmacro2_semver_exempt" cargo install cargo-tarpaulin -f
     - name: Run tests
       run: cargo tarpaulin --output-dir coverage -o lcov
     - name: Upload coverage reports to Codecov
