@@ -1,7 +1,7 @@
 use nix::unistd::execvp;
 use std::collections::BTreeSet;
 use std::env;
-use std::ffi::{CString, CStr};
+use std::ffi::{CStr, CString};
 use std::fmt::Write as FmtWrite;
 use std::iter::once;
 use std::path::{Component, Path, PathBuf};
@@ -164,17 +164,83 @@ fn main() {
     // TODO: handle chat, serve-web, and tunnel
 
     // The first arg must match the exec filename
-    let args: Vec<CString> = once(CODE.to_owned()).chain(
-        env::args()
-            .skip(1)
-            .map(|arg|
-                to_cstring(convert_path(arg, &mut ddash, &mut prev, &param_flags))
-            )
-    ).collect();
+    let args: Vec<CString> = once(CODE.to_owned())
+        .chain(
+            env::args()
+                .skip(1)
+                .map(|arg| to_cstring(convert_path(arg, &mut ddash, &mut prev, &param_flags))),
+        )
+        .collect();
 
     // Just exec here, rather than doing a fork.  This allows the existing
     // stdin and stdout to work, along with their existing pty's.
     match execvp(CODE, &args) {
         Err(_) => eprintln!("execvp failed launching {:?}", CODE),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize() {
+        assert_eq!(normalize(&"/foo".to_string()), PathBuf::from("/foo"));
+        assert_eq!(
+            normalize(&"./foo/.././Cargo.toml".to_string()),
+            PathBuf::from(env::current_dir().unwrap()).join("Cargo.toml")
+        );
+    }
+
+    #[test]
+    fn test_hex() {
+        assert_eq!(hex("\x01\x7f".to_string()), "017f");
+    }
+
+    #[test]
+    fn test_has_dir() {
+        assert_eq!(has_dir(&normalize(&".".to_string()), "src"), true);
+    }
+
+    #[test]
+    fn test_convert_path() {
+        let norm = normalize(&".".to_string()).to_str().unwrap().to_string();
+        let mut ddash = false;
+        let mut prev = false;
+        let param_flags = bset! {
+            "--log",
+        };
+
+        let params: Vec<String> = vec![
+            norm.as_str(),
+            "--log",
+            "info",
+            "--",
+            "--log",
+            "foo"
+        ].iter()
+        .map(|s| convert_path(s.to_string(), &mut ddash, &mut prev, &param_flags))
+        .collect();
+        let expected: Vec<String> = vec![
+            norm.as_str(),
+            "--log",
+            "info",
+            "--",
+            "--log",
+            "foo"
+        ].iter().map(|s| s.to_string()).collect();
+        assert_eq!(params, expected);
+    }
+
+    #[test]
+    fn test_to_cstring() {
+        let res = to_cstring("foo".to_owned());
+        assert_eq!(res, c"foo".to_owned());
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_to_cstring_fail() {
+        to_cstring("foo\0".to_string());
     }
 }
