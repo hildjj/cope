@@ -1,4 +1,14 @@
 [package]
 name = "cope"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
+
+[dependencies]
+nix = { version = "0.30.1", features = ["process"] }
+
+[profile.release]
+opt-level = "z"  # Optimize for size
+lto = true
+codegen-units = 1
+# panic = "abort"
+strip = true

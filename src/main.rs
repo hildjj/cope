@@ -1,9 +1,14 @@
+use nix::unistd::execvp;
 use std::collections::BTreeSet;
 use std::env;
+use std::ffi::{CString, CStr};
 use std::fmt::Write as FmtWrite;
+use std::iter::once;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
 
+const CODE: &CStr = c"code";
+
+/// Normalize a string into a fully-qualified path that has no . or .. in it.
 fn normalize(input: &String) -> PathBuf {
     let p = Path::new(&input);
     let abs = if p.is_absolute() {
@@ -39,6 +44,15 @@ fn hex(input: String) -> String {
     res
 }
 
+fn has_dir(pth: &PathBuf, dir: &str) -> bool {
+    let mut copy = pth.clone();
+    copy.push(dir);
+    copy.is_dir()
+}
+
+/// Convert a path to a vscode-remote://dev-container URI with the appropriate
+/// flag (--file-uri= or --folder-uri) if needed, otherwise return the original
+/// parameter.
 fn convert_path(
     input: String,
     ddash: &mut bool,
@@ -48,11 +62,13 @@ fn convert_path(
     let p = normalize(&input);
     let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut root = p.clone();
-    let mut found = false;
+    let mut found_devcontainer = false;
 
+    // If there is a --, stop processing flags
     if !*ddash {
         if input.eq("--") {
             *ddash = true;
+            *prev = false;
             return input;
         }
         if input.starts_with("-") {
@@ -66,6 +82,8 @@ fn convert_path(
             return input;
         }
     }
+    *prev = false;
+
     // TODO: Need special handling for:
     // -g --goto
 
@@ -77,25 +95,19 @@ fn convert_path(
         }
         seen.insert(s);
 
-        root.push(".devcontainer");
-        if root.is_dir() {
-            found = true;
-            root.pop();
+        if has_dir(&root, ".devcontainer") {
+            found_devcontainer = true;
             break;
         }
-        root.pop();
-
-        root.push(".git");
-        if root.is_dir() {
+        if has_dir(&root, ".git") {
             break;
         }
-        root.pop();
 
         if !root.pop() {
             break;
         }
     }
-    if found {
+    if found_devcontainer {
         let hx = hex(root.display().to_string());
         root.pop();
         format!(
@@ -123,6 +135,10 @@ macro_rules! bset {
     };
 }
 
+fn to_cstring(s: String) -> CString {
+    CString::new(s).expect("Creating CString")
+}
+
 fn main() {
     let mut ddash = false;
     let mut prev = false;
@@ -130,31 +146,35 @@ fn main() {
     // TODO: I would rather this be thread-local global, so it doesn't
     // need to be passed around.
     let param_flags = bset! {
-        "--locale",
-        "--profile",
-        "--category",
-        "--install-extension", // No install from dir in container
-        "--uninstall-extension",
-        "--enable-proposed-api",
         "--add-mcp",
-        "--log",
+        "--category",
         "--disable-extension",
-        "--inspect-extensions",
+        "--enable-proposed-api",
         "--inspect-brk-extensions",
-        "--locate-shell-integration-path"
+        "--inspect-extensions",
+        "--install-extension", // No install from dir in container
+        "--locale",
+        "--locate-shell-integration-path",
+        "--log",
+        "--profile",
+        "--sync",
+        "--uninstall-extension",
     };
 
     // TODO: handle chat, serve-web, and tunnel
 
-    let args: Vec<String> = env::args()
-        .skip(1)
-        .map(|arg| convert_path(arg, &mut ddash, &mut prev, &param_flags))
-        .collect();
-    Command::new("code")
-        .args(args)
-        .stdout(Stdio::inherit())
-        .stdin(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .expect("Spawning 'code'");
+    // The first arg must match the exec filename
+    let args: Vec<CString> = once(CODE.to_owned()).chain(
+        env::args()
+            .skip(1)
+            .map(|arg|
+                to_cstring(convert_path(arg, &mut ddash, &mut prev, &param_flags))
+            )
+    ).collect();
+
+    // Just exec here, rather than doing a fork.  This allows the existing
+    // stdin and stdout to work, along with their existing pty's.
+    match execvp(CODE, &args) {
+        Err(_) => eprintln!("execvp failed launching {:?}", CODE),
+    }
 }
