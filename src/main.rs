@@ -8,6 +8,7 @@ use std::path::{Component, Path, PathBuf};
 
 const CODE: &CStr = c"code";
 
+/// Normalize a string into a fully-qualified path that has no . or .. in it.
 fn normalize(input: &String) -> PathBuf {
     let p = Path::new(&input);
     let abs = if p.is_absolute() {
@@ -173,5 +174,7 @@ fn main() {
 
     // Just exec here, rather than doing a fork.  This allows the existing
     // stdin and stdout to work, along with their existing pty's.
-    execvp(CODE, &args).expect("Executing 'code'");
+    match execvp(CODE, &args) {
+        Err(_) => eprintln!("execvp failed launching {:?}", CODE),
+    }
 }
