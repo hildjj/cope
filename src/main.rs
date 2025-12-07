@@ -45,7 +45,7 @@ fn to_devcontainer_uri(arg: &String) -> String {
         )
     } else {
         arg.clone()
-    }    
+    }
 }
 
 // State machine for argument processing.
@@ -113,8 +113,7 @@ impl Cli<'_> {
                     result.push(to_devcontainer_uri(&arg));
                     (result, ArgState::Normal)
                 }
-
-            }
+            },
         );
         if let ArgState::ExpectingNonFilename(flag) = final_state {
             eprintln!("Warning(cope): flag {} expects a value", flag);
@@ -207,9 +206,7 @@ mod tests {
     }
 
     fn convert_args(args: &[&str]) -> Vec<String> {
-        let args: Vec<String> = args
-            .iter()
-            .map(|&s| s.into()).collect();
+        let args: Vec<String> = args.iter().map(|&s| s.into()).collect();
         let mut cli = Cli::new();
         cli.process_args(args)
             .iter()
@@ -218,19 +215,15 @@ mod tests {
     }
 
     fn assert_file_uri(arg: impl AsRef<str>) {
-        assert!(arg.as_ref().starts_with("--file-uri=vscode-remote://dev-container+"));
+        assert!(
+            arg.as_ref()
+                .starts_with("--file-uri=vscode-remote://dev-container+")
+        );
     }
 
     #[test]
     fn test_convert_path() {
-        let actual = convert_args(&[
-            "Cargo.toml",
-            "/",
-            "--log", 
-            "info", 
-            "--",
-            "--log", 
-        ]);
+        let actual = convert_args(&["Cargo.toml", "/", "--log", "info", "--", "--log"]);
 
         assert_file_uri(&actual[0]);
         let last = actual.len() - 1;
@@ -244,20 +237,14 @@ mod tests {
 
     #[test]
     fn test_invalid_trailing_needfile() {
-        let actual = convert_args(&[
-            "--log", 
-        ]);
+        let actual = convert_args(&["--log"]);
         // Expect eprintln
         assert_eq!(actual[0], "--log");
     }
 
     #[test]
     fn test_needfile() {
-        let actual = convert_args(&[
-            "-d", 
-            "one",
-            "two"
-        ]);
+        let actual = convert_args(&["-d", "one", "two"]);
         // Expect eprintln
         assert_eq!(actual[0], "-d");
         assert_file_uri(&actual[1]);
