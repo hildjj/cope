@@ -8,17 +8,63 @@ use std::path::{Component, Path, PathBuf};
 
 const CODE: &CStr = c"code";
 
+fn to_devcontainer_uri(arg: &String) -> String {
+    let p = normalize(arg);
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut root = p.clone();
+    let mut found_devcontainer = false;
+
+    for _comp in p.components().rev() {
+        let s = root.display().to_string();
+        // Prevent loops, including the root.
+        if seen.contains(&s) {
+            break;
+        }
+        seen.insert(s);
+
+        if has_dir(&root, ".devcontainer") {
+            found_devcontainer = true;
+            break;
+        }
+        if has_dir(&root, ".git") {
+            break;
+        }
+
+        if !root.pop() {
+            break;
+        }
+    }
+    if found_devcontainer {
+        let hx = hex(root.display().to_string());
+        root.pop();
+        format!(
+            "--{}-uri=vscode-remote://dev-container+{}/workspaces/{}",
+            if p.is_dir() { "folder" } else { "file" },
+            hx,
+            p.strip_prefix(root).expect("stripping prefix").display()
+        )
+    } else {
+        arg.clone()
+    }    
+}
+
+// State machine for argument processing.
+enum ArgState {
+    /// Normal argument processing
+    Normal,
+    /// After seeing `--`, all remaining args are potential paths
+    AfterDoubleDash,
+    /// Previous arg was a flag that expects a non-filename value
+    ExpectingNonFilename(String),
+}
+
 struct Cli<'a> {
-    ddash: bool,
-    prev: bool,
     flags: BTreeSet<&'a str>,
 }
 
 impl Cli<'_> {
     fn new<'a>() -> Cli<'a> {
         Cli {
-            ddash: false,
-            prev: false,
             flags: BTreeSet::from([
                 "--add-mcp",
                 "--category",
@@ -36,67 +82,44 @@ impl Cli<'_> {
             ]),
         }
     }
-    fn convert_path(&mut self, input: String) -> CString {
-        let p = normalize(&input);
-        let mut seen: BTreeSet<String> = BTreeSet::new();
-        let mut root = p.clone();
-        let mut found_devcontainer = false;
-
-        // If there is a --, stop processing flags
-        if !self.ddash {
-            if input.eq("--") {
-                self.ddash = true;
-                self.prev = false;
-                return to_cstring(input);
-            }
-            if input.starts_with("-") {
-                if self.flags.contains(input.as_str()) {
-                    self.prev = true;
+    fn process_args(&mut self, args: impl IntoIterator<Item = String>) -> Vec<CString> {
+        let (result, final_state) = args.into_iter().fold(
+            (Vec::new(), ArgState::Normal),
+            |(mut result, state), arg| match state {
+                // TODO: Add another state for -g --goto
+                ArgState::ExpectingNonFilename(_) => {
+                    result.push(arg);
+                    (result, ArgState::Normal)
                 }
-                return to_cstring(input);
+                ArgState::AfterDoubleDash => {
+                    result.push(to_devcontainer_uri(&arg));
+                    (result, ArgState::AfterDoubleDash)
+                }
+                ArgState::Normal if arg == "--" => {
+                    result.push(arg);
+                    (result, ArgState::AfterDoubleDash)
+                }
+                ArgState::Normal if arg.starts_with('-') => {
+                    let needs_value = self.flags.contains(&arg.as_str());
+                    let next = if needs_value {
+                        ArgState::ExpectingNonFilename(arg.clone())
+                    } else {
+                        ArgState::Normal
+                    };
+                    result.push(arg);
+                    (result, next)
+                }
+                ArgState::Normal => {
+                    result.push(to_devcontainer_uri(&arg));
+                    (result, ArgState::Normal)
+                }
+
             }
-            if self.prev {
-                self.prev = false;
-                return to_cstring(input);
-            }
+        );
+        if let ArgState::ExpectingNonFilename(flag) = final_state {
+            eprintln!("Warning(cope): flag {} expects a value", flag);
         }
-        self.prev = false;
-
-        // TODO: Need special handling for:
-        // -g --goto
-
-        for _comp in p.components().rev() {
-            let s = root.display().to_string();
-            // Prevent loops, including the root.
-            if seen.contains(&s) {
-                break;
-            }
-            seen.insert(s);
-
-            if has_dir(&root, ".devcontainer") {
-                found_devcontainer = true;
-                break;
-            }
-            if has_dir(&root, ".git") {
-                break;
-            }
-
-            if !root.pop() {
-                break;
-            }
-        }
-        if found_devcontainer {
-            let hx = hex(root.display().to_string());
-            root.pop();
-            to_cstring(format!(
-                "--{}-uri=vscode-remote://dev-container+{}/workspaces/{}",
-                if p.is_dir() { "folder" } else { "file" },
-                hx,
-                p.strip_prefix(root).expect("stripping prefix").display()
-            ))
-        } else {
-            to_cstring(input)
-        }
+        result.into_iter().map(to_cstring).collect()
     }
 }
 
@@ -150,11 +173,7 @@ fn main() {
 
     // The first arg must match the exec filename
     let args: Vec<CString> = once(CODE.to_owned())
-        .chain(
-            env::args()
-                .skip(1)
-                .map(|arg| cli.convert_path(arg)),
-        )
+        .chain(cli.process_args(env::args().skip(1)))
         .collect();
 
     // Just exec here, rather than doing a fork.  This allows the existing
@@ -187,27 +206,62 @@ mod tests {
         assert!(has_dir(&normalize(&".".to_string()), "src"));
     }
 
+    fn convert_args(args: &[&str]) -> Vec<String> {
+        let args: Vec<String> = args
+            .iter()
+            .map(|&s| s.into()).collect();
+        let mut cli = Cli::new();
+        cli.process_args(args)
+            .iter()
+            .map(|cs| cs.clone().into_string().unwrap())
+            .collect()
+    }
+
+    fn assert_file_uri(arg: impl AsRef<str>) {
+        assert!(arg.as_ref().starts_with("--file-uri=vscode-remote://dev-container+"));
+    }
+
     #[test]
     fn test_convert_path() {
-        let mut cli = Cli::new();
-        let params: Vec<String> = [
+        let actual = convert_args(&[
             "Cargo.toml",
             "/",
             "--log", 
             "info", 
             "--",
-        ]
-        .iter()
-        .map(|&s| s.into())
-        .map(|s| cli.convert_path(s))
-        .map(|cs| cs.into_string().unwrap())
-        .collect();
-        assert!(params[0].starts_with("--file-uri=vscode-remote://dev-container+"));
+            "--log", 
+        ]);
+
+        assert_file_uri(&actual[0]);
+        let last = actual.len() - 1;
+        assert_file_uri(&actual[last]);
         let expected: Vec<String> = ["/", "--log", "info", "--"]
             .iter()
             .map(|&s| s.into())
             .collect();
-        assert_eq!(params[1..], expected);
+        assert_eq!(actual[1..last], expected);
+    }
+
+    #[test]
+    fn test_invalid_trailing_needfile() {
+        let actual = convert_args(&[
+            "--log", 
+        ]);
+        // Expect eprintln
+        assert_eq!(actual[0], "--log");
+    }
+
+    #[test]
+    fn test_needfile() {
+        let actual = convert_args(&[
+            "-d", 
+            "one",
+            "two"
+        ]);
+        // Expect eprintln
+        assert_eq!(actual[0], "-d");
+        assert_file_uri(&actual[1]);
+        assert_file_uri(&actual[2]);
     }
 
     #[test]
