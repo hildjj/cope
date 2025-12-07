@@ -7,6 +7,21 @@ use std::iter::once;
 use std::path::{Component, Path, PathBuf};
 
 const CODE: &CStr = c"code";
+const SKIP_FLAGS: &[&str] = &[
+    "--add-mcp",
+    "--category",
+    "--disable-extension",
+    "--enable-proposed-api",
+    "--inspect-brk-extensions",
+    "--inspect-extensions",
+    "--install-extension", // No install from dir in container
+    "--locale",
+    "--locate-shell-integration-path",
+    "--log",
+    "--profile",
+    "--sync",
+    "--uninstall-extension",
+];
 
 fn to_devcontainer_uri(arg: &String) -> String {
     let p = normalize(arg);
@@ -58,68 +73,43 @@ enum ArgState {
     ExpectingNonFilename(String),
 }
 
-struct Cli<'a> {
-    flags: BTreeSet<&'a str>,
-}
-
-impl Cli<'_> {
-    fn new<'a>() -> Cli<'a> {
-        Cli {
-            flags: BTreeSet::from([
-                "--add-mcp",
-                "--category",
-                "--disable-extension",
-                "--enable-proposed-api",
-                "--inspect-brk-extensions",
-                "--inspect-extensions",
-                "--install-extension", // No install from dir in container
-                "--locale",
-                "--locate-shell-integration-path",
-                "--log",
-                "--profile",
-                "--sync",
-                "--uninstall-extension",
-            ]),
-        }
+fn process_args(args: impl IntoIterator<Item = String>) -> Vec<CString> {
+    let (result, final_state) = args.into_iter().fold(
+        (Vec::new(), ArgState::Normal),
+        |(mut result, state), arg| match state {
+            // TODO: Add another state for -g --goto
+            ArgState::ExpectingNonFilename(_) => {
+                result.push(arg);
+                (result, ArgState::Normal)
+            }
+            ArgState::AfterDoubleDash => {
+                result.push(to_devcontainer_uri(&arg));
+                (result, ArgState::AfterDoubleDash)
+            }
+            ArgState::Normal if arg == "--" => {
+                result.push(arg);
+                (result, ArgState::AfterDoubleDash)
+            }
+            ArgState::Normal if arg.starts_with('-') => {
+                let needs_value = SKIP_FLAGS.binary_search(&arg.as_str()).is_ok();
+                let next = if needs_value {
+                    ArgState::ExpectingNonFilename(arg.clone())
+                } else {
+                    ArgState::Normal
+                };
+                result.push(arg);
+                (result, next)
+            }
+            ArgState::Normal => {
+                result.push(to_devcontainer_uri(&arg));
+                (result, ArgState::Normal)
+            }
+        },
+    );
+    if let ArgState::ExpectingNonFilename(flag) = final_state {
+        eprintln!("Warning(cope): flag {} expects a value", flag);
     }
-    fn process_args(&mut self, args: impl IntoIterator<Item = String>) -> Vec<CString> {
-        let (result, final_state) = args.into_iter().fold(
-            (Vec::new(), ArgState::Normal),
-            |(mut result, state), arg| match state {
-                // TODO: Add another state for -g --goto
-                ArgState::ExpectingNonFilename(_) => {
-                    result.push(arg);
-                    (result, ArgState::Normal)
-                }
-                ArgState::AfterDoubleDash => {
-                    result.push(to_devcontainer_uri(&arg));
-                    (result, ArgState::AfterDoubleDash)
-                }
-                ArgState::Normal if arg == "--" => {
-                    result.push(arg);
-                    (result, ArgState::AfterDoubleDash)
-                }
-                ArgState::Normal if arg.starts_with('-') => {
-                    let needs_value = self.flags.contains(&arg.as_str());
-                    let next = if needs_value {
-                        ArgState::ExpectingNonFilename(arg.clone())
-                    } else {
-                        ArgState::Normal
-                    };
-                    result.push(arg);
-                    (result, next)
-                }
-                ArgState::Normal => {
-                    result.push(to_devcontainer_uri(&arg));
-                    (result, ArgState::Normal)
-                }
-            },
-        );
-        if let ArgState::ExpectingNonFilename(flag) = final_state {
-            eprintln!("Warning(cope): flag {} expects a value", flag);
-        }
-        result.into_iter().map(to_cstring).collect()
-    }
+    result.into_iter().map(to_cstring).collect()
 }
 
 /// Normalize a string into a fully-qualified path that has no . or .. in it.
@@ -166,14 +156,21 @@ fn to_cstring(s: String) -> CString {
     CString::new(s).expect("Creating CString")
 }
 
+fn debug_args(write: bool, args: &[CString]) {
+    if write {
+        args.iter().for_each(|a| eprint!("{:?} ", a));
+        eprintln!();
+    }
+}
+
 fn main() {
-    let mut cli = Cli::new();
     // TODO: handle chat, serve-web, and tunnel
 
     // The first arg must match the exec filename
     let args: Vec<CString> = once(CODE.to_owned())
-        .chain(cli.process_args(env::args().skip(1)))
+        .chain(process_args(env::args().skip(1)))
         .collect();
+    debug_args(env::var("COPE_VERBOSE").is_ok(), &args);
 
     // Just exec here, rather than doing a fork.  This allows the existing
     // stdin and stdout to work, along with their existing pty's.
@@ -207,8 +204,7 @@ mod tests {
 
     fn convert_args(args: &[&str]) -> Vec<String> {
         let args: Vec<String> = args.iter().map(|&s| s.into()).collect();
-        let mut cli = Cli::new();
-        cli.process_args(args)
+        process_args(args)
             .iter()
             .map(|cs| cs.clone().into_string().unwrap())
             .collect()
@@ -255,6 +251,11 @@ mod tests {
     fn test_to_cstring() {
         let res = to_cstring("foo".to_owned());
         assert_eq!(res, c"foo".to_owned());
+    }
+
+    #[test]
+    fn test_debug() {
+        debug_args(true, &[c"foo".to_owned()]);
     }
 
     #[test]
