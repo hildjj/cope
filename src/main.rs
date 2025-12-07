@@ -8,6 +8,98 @@ use std::path::{Component, Path, PathBuf};
 
 const CODE: &CStr = c"code";
 
+struct Cli<'a> {
+    ddash: bool,
+    prev: bool,
+    flags: BTreeSet<&'a str>,
+}
+
+impl Cli<'_> {
+    fn new<'a>() -> Cli<'a> {
+        Cli {
+            ddash: false,
+            prev: false,
+            flags: BTreeSet::from([
+                "--add-mcp",
+                "--category",
+                "--disable-extension",
+                "--enable-proposed-api",
+                "--inspect-brk-extensions",
+                "--inspect-extensions",
+                "--install-extension", // No install from dir in container
+                "--locale",
+                "--locate-shell-integration-path",
+                "--log",
+                "--profile",
+                "--sync",
+                "--uninstall-extension",
+            ]),
+        }
+    }
+    fn convert_path(&mut self, input: String) -> CString {
+        let p = normalize(&input);
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        let mut root = p.clone();
+        let mut found_devcontainer = false;
+
+        // If there is a --, stop processing flags
+        if !self.ddash {
+            if input.eq("--") {
+                self.ddash = true;
+                self.prev = false;
+                return to_cstring(input);
+            }
+            if input.starts_with("-") {
+                if self.flags.contains(input.as_str()) {
+                    self.prev = true;
+                }
+                return to_cstring(input);
+            }
+            if self.prev {
+                self.prev = false;
+                return to_cstring(input);
+            }
+        }
+        self.prev = false;
+
+        // TODO: Need special handling for:
+        // -g --goto
+
+        for _comp in p.components().rev() {
+            let s = root.display().to_string();
+            // Prevent loops, including the root.
+            if seen.contains(&s) {
+                break;
+            }
+            seen.insert(s);
+
+            if has_dir(&root, ".devcontainer") {
+                found_devcontainer = true;
+                break;
+            }
+            if has_dir(&root, ".git") {
+                break;
+            }
+
+            if !root.pop() {
+                break;
+            }
+        }
+        if found_devcontainer {
+            let hx = hex(root.display().to_string());
+            root.pop();
+            to_cstring(format!(
+                "--{}-uri=vscode-remote://dev-container+{}/workspaces/{}",
+                if p.is_dir() { "folder" } else { "file" },
+                hx,
+                p.strip_prefix(root).expect("stripping prefix").display()
+            ))
+        } else {
+            to_cstring(input)
+        }
+    }
+}
+
 /// Normalize a string into a fully-qualified path that has no . or .. in it.
 fn normalize(input: &String) -> PathBuf {
     let p = Path::new(&input);
@@ -44,95 +136,8 @@ fn hex(input: String) -> String {
     res
 }
 
-fn has_dir(pth: &PathBuf, dir: &str) -> bool {
-    let mut copy = pth.clone();
-    copy.push(dir);
-    copy.is_dir()
-}
-
-/// Convert a path to a vscode-remote://dev-container URI with the appropriate
-/// flag (--file-uri= or --folder-uri) if needed, otherwise return the original
-/// parameter.
-fn convert_path(
-    input: String,
-    ddash: &mut bool,
-    prev: &mut bool,
-    param_flags: &BTreeSet<String>,
-) -> String {
-    let p = normalize(&input);
-    let mut seen: BTreeSet<String> = BTreeSet::new();
-    let mut root = p.clone();
-    let mut found_devcontainer = false;
-
-    // If there is a --, stop processing flags
-    if !*ddash {
-        if input.eq("--") {
-            *ddash = true;
-            *prev = false;
-            return input;
-        }
-        if input.starts_with("-") {
-            if param_flags.contains(&input) {
-                *prev = true;
-            }
-            return input;
-        }
-        if *prev {
-            *prev = false;
-            return input;
-        }
-    }
-    *prev = false;
-
-    // TODO: Need special handling for:
-    // -g --goto
-
-    for _comp in p.components().rev() {
-        let s = root.display().to_string();
-        // Prevent loops, including the root.
-        if seen.contains(&s) {
-            break;
-        }
-        seen.insert(s);
-
-        if has_dir(&root, ".devcontainer") {
-            found_devcontainer = true;
-            break;
-        }
-        if has_dir(&root, ".git") {
-            break;
-        }
-
-        if !root.pop() {
-            break;
-        }
-    }
-    if found_devcontainer {
-        let hx = hex(root.display().to_string());
-        root.pop();
-        format!(
-            "--{}-uri=vscode-remote://dev-container+{}/workspaces/{}",
-            if p.is_dir() { "folder" } else { "file" },
-            hx,
-            p.strip_prefix(root).expect("stripping prefix").display()
-        )
-    } else {
-        input
-    }
-}
-
-// Cargo-cult copied from
-// https://docs.rs/literally/0.1.3/src/literally/lib.rs.html#95
-macro_rules! bset {
-    ( $($key:expr),* $(,)? ) => {
-        {
-            let mut _set = ::std::collections::BTreeSet::new();
-            $(
-                _set.insert($key.into());
-            )*
-            _set
-        }
-    };
+fn has_dir(pth: &Path, dir: &str) -> bool {
+    pth.join(dir).is_dir()
 }
 
 fn to_cstring(s: String) -> CString {
@@ -140,27 +145,7 @@ fn to_cstring(s: String) -> CString {
 }
 
 fn main() {
-    let mut ddash = false;
-    let mut prev = false;
-
-    // TODO: I would rather this be thread-local global, so it doesn't
-    // need to be passed around.
-    let param_flags = bset! {
-        "--add-mcp",
-        "--category",
-        "--disable-extension",
-        "--enable-proposed-api",
-        "--inspect-brk-extensions",
-        "--inspect-extensions",
-        "--install-extension", // No install from dir in container
-        "--locale",
-        "--locate-shell-integration-path",
-        "--log",
-        "--profile",
-        "--sync",
-        "--uninstall-extension",
-    };
-
+    let mut cli = Cli::new();
     // TODO: handle chat, serve-web, and tunnel
 
     // The first arg must match the exec filename
@@ -168,7 +153,7 @@ fn main() {
         .chain(
             env::args()
                 .skip(1)
-                .map(|arg| to_cstring(convert_path(arg, &mut ddash, &mut prev, &param_flags))),
+                .map(|arg| cli.convert_path(arg)),
         )
         .collect();
 
@@ -188,7 +173,7 @@ mod tests {
         assert_eq!(normalize(&"/foo".to_string()), PathBuf::from("/foo"));
         assert_eq!(
             normalize(&"./foo/.././Cargo.toml".to_string()),
-            PathBuf::from(env::current_dir().unwrap()).join("Cargo.toml")
+            env::current_dir().unwrap().join("Cargo.toml")
         );
     }
 
@@ -199,37 +184,30 @@ mod tests {
 
     #[test]
     fn test_has_dir() {
-        assert_eq!(has_dir(&normalize(&".".to_string()), "src"), true);
+        assert!(has_dir(&normalize(&".".to_string()), "src"));
     }
 
     #[test]
     fn test_convert_path() {
-        let norm = normalize(&".".to_string()).to_str().unwrap().to_string();
-        let mut ddash = false;
-        let mut prev = false;
-        let param_flags = bset! {
-            "--log",
-        };
-
-        let params: Vec<String> = vec![
-            norm.as_str(),
-            "--log",
-            "info",
+        let mut cli = Cli::new();
+        let params: Vec<String> = [
+            "Cargo.toml",
+            "/",
+            "--log", 
+            "info", 
             "--",
-            "--log",
-            "foo"
-        ].iter()
-        .map(|s| convert_path(s.to_string(), &mut ddash, &mut prev, &param_flags))
+        ]
+        .iter()
+        .map(|&s| s.into())
+        .map(|s| cli.convert_path(s))
+        .map(|cs| cs.into_string().unwrap())
         .collect();
-        let expected: Vec<String> = vec![
-            norm.as_str(),
-            "--log",
-            "info",
-            "--",
-            "--log",
-            "foo"
-        ].iter().map(|s| s.to_string()).collect();
-        assert_eq!(params, expected);
+        assert!(params[0].starts_with("--file-uri=vscode-remote://dev-container+"));
+        let expected: Vec<String> = ["/", "--log", "info", "--"]
+            .iter()
+            .map(|&s| s.into())
+            .collect();
+        assert_eq!(params[1..], expected);
     }
 
     #[test]
