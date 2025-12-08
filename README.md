@@ -14,7 +14,11 @@ defined.
 
     cope -h # Gets help from code
 
-Most `code` command lines should work by changing `code` to `cope`.
+Most `code` command lines should work by changing `code` to `cope`.  If you want
+to see the actual command line that cope is executing, set the COPE_VERBOSE
+environment variable:
+
+    COPE_VERBOSE=1 cope .
 
 ## Known limitations
 

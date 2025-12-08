@@ -1,0 +1,15 @@
+{
+  "name": "Rust",
+  "image": "mcr.microsoft.com/devcontainers/rust:latest",
+  "customizations": {
+    "vscode": {
+      "settings": {},
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "matklad.rust-analyzer",
+        "vadimcn.vscode-lldb"
+      ]
+    }
+  },
+  "postCreateCommand": "cargo install --locked cargo-tarpaulin"
+}
