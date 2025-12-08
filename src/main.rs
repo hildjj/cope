@@ -23,7 +23,7 @@ const SKIP_FLAGS: &[&str] = &[
     "--uninstall-extension",
 ];
 
-fn to_devcontainer_uri(arg: &String) -> String {
+fn to_devcontainer_uri(arg: &str) -> String {
     let p = normalize(arg);
     let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut root = p.clone();
@@ -59,7 +59,7 @@ fn to_devcontainer_uri(arg: &String) -> String {
             p.strip_prefix(root).expect("stripping prefix").display()
         )
     } else {
-        arg.clone()
+        arg.to_string()
     }
 }
 
@@ -83,7 +83,7 @@ fn process_args(args: impl IntoIterator<Item = String>) -> Vec<CString> {
                 (result, ArgState::Normal)
             }
             ArgState::AfterDoubleDash => {
-                result.push(to_devcontainer_uri(&arg));
+                result.push(to_devcontainer_uri(arg.as_str()));
                 (result, ArgState::AfterDoubleDash)
             }
             ArgState::Normal if arg == "--" => {
@@ -113,7 +113,7 @@ fn process_args(args: impl IntoIterator<Item = String>) -> Vec<CString> {
 }
 
 /// Normalize a string into a fully-qualified path that has no . or .. in it.
-fn normalize(input: &String) -> PathBuf {
+fn normalize(input: &str) -> PathBuf {
     let p = Path::new(&input);
     let abs = if p.is_absolute() {
         p.to_path_buf()
@@ -185,9 +185,9 @@ mod tests {
 
     #[test]
     fn test_normalize() {
-        assert_eq!(normalize(&"/foo".to_string()), PathBuf::from("/foo"));
+        assert_eq!(normalize("/foo"), PathBuf::from("/foo"));
         assert_eq!(
-            normalize(&"./foo/.././Cargo.toml".to_string()),
+            normalize("./foo/.././Cargo.toml"),
             env::current_dir().unwrap().join("Cargo.toml")
         );
     }
@@ -199,7 +199,7 @@ mod tests {
 
     #[test]
     fn test_has_dir() {
-        assert!(has_dir(&normalize(&".".to_string()), "src"));
+        assert!(has_dir(&normalize("."), "src"));
     }
 
     fn convert_args(args: &[&str]) -> Vec<String> {
