@@ -1,6 +1,6 @@
 [package]
 name = "cope"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 authors = [
   "Joe Hildebrand <joe-github@cursive.net>"
@@ -8,6 +8,7 @@ authors = [
 
 [dependencies]
 nix = { version = "0.30.1", features = ["process"] }
+phf = { version = "0.13.1", features = ["macros"] }
 
 [profile.release]
 opt-level = "z"  # Optimize for size
