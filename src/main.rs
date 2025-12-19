@@ -1,11 +1,22 @@
+mod file_utils;
+mod string_utils;
+
+use dialoguer::Select;
 use nix::unistd::execvp;
-use std::collections::BTreeSet;
+use phf::phf_map;
+use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::env;
 use std::ffi::{CStr, CString, OsStr, OsString};
-use std::fmt::Write as FmtWrite;
-use std::os::unix::ffi::OsStrExt;
-use std::path::{Component, Path, PathBuf};
-use phf::phf_map;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use crate::file_utils::FindOptions;
+pub use crate::file_utils::{files_matching, find_dir_up, normalize};
+pub use crate::string_utils::{debug_arg, debug_args, hex, to_cstring};
+
+const DEVCONTAINER_DIR: &str = ".devcontainer";
+const CONFIG_FILE: &str = "devcontainer.json";
 
 const CODE: &CStr = c"code";
 static PARAM_SIZE: phf::Map<&'static str, usize> = phf_map! {
@@ -35,83 +46,178 @@ static PARAM_SIZE: phf::Map<&'static str, usize> = phf_map! {
     "-m" => 4,
 };
 
-/// Normalize a string into a fully-qualified path that has no . or .. in it.
-fn normalize(input: &OsStr) -> PathBuf {
-    let p = Path::new(&input);
-    let abs = if p.is_absolute() {
-        p.to_path_buf()
+#[derive(Deserialize, Debug)]
+struct DevContainer {
+    name: Option<String>,
+
+    #[serde(rename = "workspaceFolder")]
+    workspace_folder: Option<String>,
+}
+
+struct JsonResults {
+    pub file_name: PathBuf,
+    pub dev_container: DevContainer,
+}
+
+struct DirProperties {
+    pub hex: String,
+    pub folder: String,
+}
+
+fn read_json(file_name: PathBuf) -> JsonResults {
+    let json_data = fs::read_to_string(file_name.clone())
+        .unwrap_or_else(|er| panic!("Error reading file {file_name:?} {er}"));
+    let dev_container = serde_json::from_str(&json_data)
+        .unwrap_or_else(|er| panic!("Error parsing JSON {file_name:?} {er}"));
+    JsonResults {
+        file_name: file_name,
+        dev_container,
+    }
+}
+
+/// Ask on stderr which of the given items is desired
+fn choose<'a>(matches: &'a Vec<JsonResults>, root: &Path) -> &'a JsonResults {
+    // See https://github.com/console-rs/console/pull/173 for testing
+    let items = matches.iter().map(|m| {
+        format!(
+            "{} ({:?})",
+            m.dev_container
+                .name
+                .clone()
+                .unwrap_or("<no name>".to_string()),
+            m.file_name.strip_prefix(root).expect("Relative to root")
+        )
+    });
+
+    let selection = Select::new()
+        .with_prompt("Which container?")
+        .items(items)
+        .default(0)
+        .interact()
+        .expect("Selection failed");
+    &matches[selection]
+}
+
+/// Convert the given config file into the internal format that the Dev
+/// Containers extension expects.  This is an undocumented interface, so I
+/// expect it to be brittle. To find examples for this, open the Developer
+/// Tools in VScode with Cmd-P, "Developer: Toggle Developer Tools", go to the
+/// console, and enter: `window.vscode.context.configuration().workspace.uri`.
+/// Fiddle around with the results to find value of the _formatted field, then
+/// hex decode.
+pub fn container_id(root: &Path, chosen: &Path) -> String {
+    // Maintain compatibility with the URI that the `devcontainer` CLI uses,
+    // if we are just opening the default config.
+    if chosen.eq(&root.join(DEVCONTAINER_DIR).join(CONFIG_FILE)) {
+        root.to_string_lossy().into()
     } else {
-        env::current_dir()
-            .expect("failed to get current directory")
-            .join(p)
+        // This string is incredibly picky.  It just looks like JSON but it
+        // apparently isn't.  All of the weird bits need to be there, in this
+        // order, with no additional whitespace.
+        format!(
+            r#"{{"hostPath":{root:?},"localDocker":false,"settings":{{"context":"desktop-linux"}},"configFile":{{"$mid":1,"fsPath":{chosen:?},"external":"file://{}","path":{chosen:?},"scheme":"file"}}}}"#,
+            chosen.to_string_lossy()
+        )
+    }
+}
+
+/// Compute the hex bits for the devcontainer URI, as well as the name of the 
+/// project folder *inside* the container.
+fn dir_properties(root: &Path) -> Option<DirProperties> {
+    let matches: Vec<JsonResults> = files_matching(root, CONFIG_FILE).map(read_json).collect();
+
+    let chosen = match matches.len() {
+        0 => {
+            // No devcontainer.json found in .devcontainer/
+            return None;
+        }
+        1 => {
+            // Only one.  The most common case.
+            &matches[0]
+        }
+        _ => choose(&matches, &root),
     };
-    let mut normalized = PathBuf::new();
-    for comp in abs.components() {
-        match comp {
-            Component::CurDir => {
-                // skip
-            }
-            Component::ParentDir => {
-                // pop one component if possible; if at root, ignore ParentDir so it
-                // won't escape above the absolute root.
-                normalized.pop();
-            }
-            other => normalized.push(other.as_os_str()),
-        }
-    }
 
-    normalized
+    // Remove .devcontainer
+    let mut root = root.to_path_buf();
+    root.pop();
+    let id = container_id(&root, &chosen.file_name);
+    debug_arg(env::var("COPE_VERBOSE").is_ok(), &id);
+    let hex = hex(id.as_bytes());
+
+    let folder = chosen
+        .dev_container
+        .workspace_folder
+        .clone()
+        .unwrap_or_else(|| {
+            format!(
+                "/workspaces/{}",
+                root.iter()
+                    .next_back()
+                    .expect("Last path segment")
+                    .to_string_lossy()
+            )
+        });
+    Some(DirProperties { hex, folder })
 }
 
-fn to_devcontainer_uri(arg: &OsStr) -> CString {
-    let p = normalize(arg);
-    let mut seen: BTreeSet<String> = BTreeSet::new();
-    let mut root = p.clone();
-    let mut found_devcontainer = false;
+/// If this is a file in a directory that has a devcontainer, convert it to
+/// a vscode-remote: URI.  If not, just convert to a CString.
+fn to_devcontainer_uri(
+    arg: &OsStr,
+    dir: &str,
+    cache: &mut BTreeMap<PathBuf, Option<DirProperties>>,
+) -> CString {
+    let pth = normalize(arg);
+    if let Some(mut root) = find_dir_up(
+        &pth,
+        FindOptions {
+            dir,
+            stop: Some(".git"),
+        },
+    ) {
+        let cached = cache
+            .entry(root.clone())
+            .or_insert_with(|| dir_properties(&root));
 
-    for _comp in p.components().rev() {
-        let s = root.display().to_string();
-        // Prevent loops, including the root.
-        if seen.contains(&s) {
-            break;
-        }
-        seen.insert(s);
-
-        if has_dir(&root, ".devcontainer") {
-            found_devcontainer = true;
-            break;
-        }
-
-        // Found .git before .devcontainer, which means we are unlikely to
-        // be in a devcontainer directory.
-        if has_dir(&root, ".git") {
-            break;
-        }
-
-        if !root.pop() {
-            break;
+        if let Some(props) = cached {
+            root.pop();
+            println!("{pth:?} {root:?}");
+            return CString::new(format!(
+                "--{}-uri=vscode-remote://dev-container+{}{}/{}",
+                if pth.is_dir() { "folder" } else { "file" },
+                props.hex,
+                props.folder,
+                pth.strip_prefix(root).expect("stripping prefix").display()
+            ))
+            .expect("Bad CString from format");
         }
     }
-    if found_devcontainer {
-        let hx = hex(root.display().to_string());
-        root.pop();
-        CString::new(format!(
-            "--{}-uri=vscode-remote://dev-container+{}/workspaces/{}",
-            if p.is_dir() { "folder" } else { "file" },
-            hx,
-            p.strip_prefix(root).expect("stripping prefix").display()
-        )).expect("Bad CString from format")
-    } else {
-        CString::new(arg.as_bytes()).expect("Bad CString from OsString")
-    }
+
+    // No .devcontainer/ in the parents, or no devcontainer.json in
+    // .devcontainer
+    to_cstring(arg.into())
 }
 
+/// For each arg, if it might be a file name, see if the file name needs to be
+/// converted to a URI.  Otherwise pass the arg through.
 fn process_args(args: impl ExactSizeIterator<Item = OsString>) -> Vec<CString> {
+    let mut args: Vec<OsString> = args.collect();
+    if args.len() == 1 {
+        // This is the default in the code CLI, but we need a chance to 
+        // permute it into a file URI.
+        args.push(OsString::from("."));
+    }
     let mut result: Vec<CString> = Vec::with_capacity(args.len());
     let mut it = args.into_iter();
-    
+
     result.push(CODE.to_owned());
     it.next().expect("Always expect 'cope' as the 0th param");
+
+    // Cache so we don't call `choose` twice for the same directory.
+    // The perf is unlikely to matter in practice, but the UX of having to 
+    // answer the same question twice is bad.
+    let mut cache: BTreeMap<PathBuf, Option<DirProperties>> = BTreeMap::new();
     while let Some(a) = it.next() {
         if let Some(b) = a.clone().to_str() {
             if let Some(sz) = PARAM_SIZE.get(b) {
@@ -121,29 +227,42 @@ fn process_args(args: impl ExactSizeIterator<Item = OsString>) -> Vec<CString> {
                 result.extend(it.by_ref().take(*sz).map(to_cstring));
             } else if b == "--" {
                 result.push(to_cstring(a));
-                result.extend(it.by_ref().map(|s| to_devcontainer_uri(s.as_os_str())));
+                result.extend(
+                    it.by_ref()
+                        .map(|s| to_devcontainer_uri(s.as_os_str(), DEVCONTAINER_DIR, &mut cache)),
+                );
                 break;
             } else if b.starts_with("--") {
-                // Other parameters are passed through unmodified, 
+                // Other parameters are passed through unmodified,
                 // and they don't have follow-on parameters.
                 result.push(to_cstring(a));
             } else if b.starts_with("-") {
-                if (b.len() > 2) && (
-                    b.contains('a') || b.contains('d') || b.contains('g') || b.contains('m')
-                ) {
-                    eprintln!("cope does not handle coalesced single letter flags with parameters cleanly yet")
+                if (b.len() > 2)
+                    && (b.contains('a') || b.contains('d') || b.contains('g') || b.contains('m'))
+                {
+                    eprintln!(
+                        "cope does not handle coalesced single letter flags with parameters cleanly yet"
+                    )
                 }
                 // Single-letter parameters, skipped
                 result.push(to_cstring(a));
             } else {
                 // This must be a filename, since everything else will
                 // have been caught above.
-                result.push(to_devcontainer_uri(a.as_os_str()));
+                result.push(to_devcontainer_uri(
+                    a.as_os_str(),
+                    DEVCONTAINER_DIR,
+                    &mut cache,
+                ));
             }
         } else {
             // Invalid UTF-8, can still be used as a path.  It can't be a
             // valid parameter flag.
-            result.push(to_devcontainer_uri(a.as_os_str()));
+            result.push(to_devcontainer_uri(
+                a.as_os_str(),
+                DEVCONTAINER_DIR,
+                &mut cache,
+            ));
         }
     }
 
@@ -153,34 +272,7 @@ fn process_args(args: impl ExactSizeIterator<Item = OsString>) -> Vec<CString> {
     result
 }
 
-fn hex(input: String) -> String {
-    let mut res = String::new();
-    for b in input.as_bytes() {
-        write!(res, "{:02x}", b).expect("String write");
-    }
-    res
-}
-
-fn has_dir(pth: &Path, dir: &str) -> bool {
-    pth.join(dir).is_dir()
-}
-
-// fn to_cstring(s: String) -> CString {
-//     CString::new(s).expect("Creating CString")
-// }
-
-fn to_cstring(s: OsString) -> CString {
-    CString::new(s.as_bytes()).expect("Creating CString")
-}
-
-fn debug_args(write: bool, args: &[CString]) {
-    if write {
-        args.iter().for_each(|a| eprint!("{:?} ", a));
-        eprintln!();
-    }
-}
-
-fn main() {    
+fn main() {
     // Just exec here, rather than doing a fork.  This allows the existing
     // stdin and stdout to work, along with their existing pty's.
     match execvp(CODE, &process_args(env::args_os())) {
@@ -190,28 +282,8 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::ffi::OsStringExt;
-
     use super::*;
-
-    #[test]
-    fn test_normalize() {
-        assert_eq!(normalize(OsStr::new("/foo")), PathBuf::from("/foo"));
-        assert_eq!(
-            normalize(OsStr::new("./foo/./.././Cargo.toml")),
-            env::current_dir().unwrap().join("Cargo.toml")
-        );
-    }
-
-    #[test]
-    fn test_hex() {
-        assert_eq!(hex("\x01\x7f".to_string()), "017f");
-    }
-
-    #[test]
-    fn test_has_dir() {
-        assert!(has_dir(&normalize(OsStr::new(".")), "src"));
-    }
+    use std::os::unix::ffi::OsStringExt;
 
     fn convert_args(args: &[&str]) -> Vec<String> {
         let oa: Vec<OsString> = args.iter().map(|&s| OsString::from(s)).collect();
@@ -225,7 +297,7 @@ mod tests {
         assert!(
             arg.to_owned()
                 .starts_with("--file-uri=vscode-remote://dev-container+"),
-            "{:?}", 
+            "{:?}",
             arg
         );
     }
@@ -285,19 +357,18 @@ mod tests {
     }
 
     #[test]
-    fn test_to_cstring() {
-        let res = to_cstring(OsString::from("foo"));
-        assert_eq!(res, c"foo".to_owned());
+    fn test_complex_container() {
+        let id = container_id(
+            &PathBuf::from("/foo"),
+            &PathBuf::from("/foo/.devcontainer/bar/devcontainer.json"),
+        );
+        assert_eq!(id.chars().next().unwrap(), '{');
     }
 
     #[test]
-    fn test_debug() {
-        debug_args(true, &[c"foo".to_owned()]);
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_to_cstring_fail() {
-        to_cstring(OsString::from("foo\0"));
+    fn test_empty_dir() {
+        let mut cache: BTreeMap<PathBuf, Option<DirProperties>> = BTreeMap::new();
+        let u = to_devcontainer_uri(&OsStr::new(std::file!()), "src", &mut cache);
+        assert_eq!(u, to_cstring(std::file!().into()));
     }
 }
