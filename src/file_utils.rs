@@ -88,7 +88,7 @@ pub fn files_matching<'a>(dir: &'a Path, file_name: &'a str) -> Box<dyn Iterator
             .expect("Error reading directory")
             .filter_map(|f| {
                 let p = f.expect("Bad path").path();
-                p.is_file().then_some(p)
+                p.is_dir().then_some(p)
             });
         let res = once(dir.into())
             .chain(subs)
