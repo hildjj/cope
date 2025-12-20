@@ -190,7 +190,6 @@ fn to_devcontainer_uri(
 
         if let Some(props) = cached {
             root.pop();
-            println!("{pth:?} {root:?}");
             return CString::new(format!(
                 "--{}-uri=vscode-remote://dev-container+{}{}/{}",
                 if pth.is_dir() { "folder" } else { "file" },
