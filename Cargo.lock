@@ -35,13 +35,13 @@ dependencies = [
 
 [[package]]
 name = "cope"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "dialoguer",
  "nix",
  "phf",
  "serde",
- "serde_json",
+ "serde_jsonc",
 ]
 
 [[package]]
@@ -77,12 +77,6 @@ name = "libc"
 version = "0.2.178"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "37c93d8daa9d8a012fd8ab92f088405fb202ea0b6ab73ee2482ae66af4f42091"
-
-[[package]]
-name = "memchr"
-version = "2.7.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f52b00d39961fc5b2736ea853c9cc86238e165017a493d1d5c8eac6bdc4cc273"
 
 [[package]]
 name = "nix"
@@ -200,16 +194,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "serde_json"
-version = "1.0.145"
+name = "serde_jsonc"
+version = "1.0.108"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "402a6f66d8c709116cf22f558eab210f5a50187f702eb4d7e5ef38d9a7f1c79c"
+checksum = "7a58154381df481a41b7536101c0daccdaf2426f244334074c4c77b89b6253a7"
 dependencies = [
  "itoa",
- "memchr",
  "ryu",
  "serde",
- "serde_core",
 ]
 
 [[package]]
