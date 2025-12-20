@@ -233,11 +233,11 @@ fn process_args(args: impl ExactSizeIterator<Item = OsString>) -> Vec<CString> {
                 // for us, so no need to check that we have enough.
                 result.extend(it.by_ref().take(*sz).map(to_cstring));
             } else if TERMINAL_PARAM.contains(b) {
+                // Nothing after a terminal can be processed as a URI. If it's
+                // a filename, when the "--" is passed to code, the --file-uri
+                // param after it gets treated as a literal filename.
                 result.push(to_cstring(a));
-                result.extend(
-                    it.by_ref()
-                        .map(|s| to_devcontainer_uri(s.as_os_str(), DEVCONTAINER_DIR, &mut cache)),
-                );
+                result.extend(it.map(to_cstring));
                 break;
             } else if b.starts_with("--") {
                 // Other parameters are passed through unmodified,
@@ -309,6 +309,15 @@ mod tests {
         );
     }
 
+    fn assert_folder_uri(arg: &str) {
+        assert!(
+            arg.to_owned()
+                .starts_with("--folder-uri=vscode-remote://dev-container+"),
+            "{:?}",
+            arg
+        );
+    }
+
     #[test]
     fn test_convert_path() {
         let actual = convert_args(&["cope", "Cargo.toml", "/", "--log", "info", "--", "--log"]);
@@ -316,7 +325,7 @@ mod tests {
         assert_eq!(&actual[0], "code");
         assert_file_uri(&actual[1]);
         let last = actual.len() - 1;
-        assert_file_uri(&actual[last]);
+        assert_eq!(&actual[last], "--log");
         let expected: Vec<String> = ["/", "--log", "info", "--"]
             .iter()
             .map(|&s| s.into())
@@ -351,6 +360,12 @@ mod tests {
         let actual = convert_args(&["cope", "-wa", "foo"]);
         // Expect eprintf
         assert_file_uri(&actual[2]);
+    }
+
+    #[test]
+    fn test_no_args() {
+        let actual = convert_args(&["cope"]);
+        assert_folder_uri(&actual[1]);
     }
 
     #[test]
