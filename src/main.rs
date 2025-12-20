@@ -3,7 +3,7 @@ mod string_utils;
 
 use dialoguer::Select;
 use nix::unistd::execvp;
-use phf::phf_map;
+use phf::{phf_map, phf_set};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::env;
@@ -46,6 +46,14 @@ static PARAM_SIZE: phf::Map<&'static str, usize> = phf_map! {
     "-m" => 4,
 };
 
+/// All params after one of these are not file names, as far as I can tell.
+static TERMINAL_PARAM: phf::Set<&'static str> = phf_set! [
+    "--",
+    "chat",
+    "serve-web",
+    "tunnel"
+];
+
 #[derive(Deserialize, Debug)]
 struct DevContainer {
     name: Option<String>,
@@ -67,7 +75,7 @@ struct DirProperties {
 fn read_json(file_name: PathBuf) -> JsonResults {
     let json_data = fs::read_to_string(file_name.clone())
         .unwrap_or_else(|er| panic!("Error reading file {file_name:?} {er}"));
-    let dev_container = serde_json::from_str(&json_data)
+    let dev_container = serde_jsonc::from_str(&json_data)
         .unwrap_or_else(|er| panic!("Error parsing JSON {file_name:?} {er}"));
     JsonResults {
         file_name: file_name,
@@ -225,7 +233,7 @@ fn process_args(args: impl ExactSizeIterator<Item = OsString>) -> Vec<CString> {
                 // If we don't have enough parameters, `code` will complain
                 // for us, so no need to check that we have enough.
                 result.extend(it.by_ref().take(*sz).map(to_cstring));
-            } else if b == "--" {
+            } else if TERMINAL_PARAM.contains(b) {
                 result.push(to_cstring(a));
                 result.extend(
                     it.by_ref()

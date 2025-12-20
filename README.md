@@ -22,5 +22,4 @@ environment variable:
 
 ## Known limitations
 
-- `--goto` does not work with devocontainers yet
-- `chat`, `serve-web`, and `tunnel` do not work yet
+- `--goto` does not work with devcontainers yet
